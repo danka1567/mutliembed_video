@@ -1,0 +1,100 @@
+name: Embed Resolver
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "URL to resolve"
+        required: false
+        default: "https://multiembed.mov/?video_id=280&tmdb=1"
+  schedule:
+    - cron: "0 */6 * * *"
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify outbound IP is a proxy (not GitHub datacenter)
+        run: |
+          python3 - << 'PYEOF'
+          import urllib.request, json, sys, random
+
+          PROXIES = [
+              ("31.59.20.176",  6754),
+              ("31.56.127.193", 7684),
+              ("45.38.107.97",  6014),
+              ("38.154.203.95", 5863),
+              ("198.105.121.200", 6462),
+              ("64.137.96.74",  6641),
+              ("198.23.243.226", 6361),
+              ("38.154.185.97", 6370),
+              ("142.111.67.146", 5611),
+              ("191.96.254.138", 6185),
+          ]
+          PROXY_USER = "glsbcfvl"
+          PROXY_PASS = "336gxb0or4n9"
+
+          BLOCKED_PREFIXES = (
+              "4.148.","4.149.","4.150.","4.151.",
+              "20.","40.","52.",
+              "13.","18.","34.","35.",
+              "104.","172.",
+          )
+
+          host, port = random.choice(PROXIES)
+          proxy_url = f"http://{PROXY_USER}:{PROXY_PASS}@{host}:{port}"
+          opener = urllib.request.build_opener(
+              urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+          )
+          opener.addheaders = [("User-Agent", "Mozilla/5.0")]
+
+          try:
+              with opener.open("https://api.ipify.org?format=json", timeout=10) as r:
+                  ip = json.loads(r.read())["ip"]
+          except Exception as e:
+              print(f"::error::Could not check outbound IP: {e}")
+              sys.exit(1)
+
+          print(f"Outbound IP via proxy: {ip}")
+          if any(ip.startswith(p) for p in BLOCKED_PREFIXES):
+              print(f"::error::IP {ip} looks like datacenter/GitHub IP. Aborting.")
+              sys.exit(1)
+
+          print(f"✅ IP {ip} is clean — proxy is active.")
+          PYEOF
+
+      - name: Run resolver through proxy
+        env:
+          RESOLVE_URL: ${{ github.event.inputs.url || 'https://multiembed.mov/?video_id=280&tmdb=1' }}
+        run: |
+          python3 embed_resolver.py "$RESOLVE_URL" | tee result.json
+
+      - name: Check result
+        run: |
+          python3 - << 'PYEOF'
+          import json, sys
+          with open("result.json") as f:
+              data = json.load(f)
+          if not data.get("ok"):
+              print(f"::error::Resolver failed: {data.get('status')} errors={data.get('errors')}")
+              sys.exit(1)
+          print(f"✅ Resolved {len(data['sources'])} sources via proxy {data['proxy_used']}")
+          PYEOF
+
+      - name: Upload result artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolver-result
+          path: result.json
+          retention-days: 7
